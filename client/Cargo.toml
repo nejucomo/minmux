@@ -1,0 +1,12 @@
+[package]
+name = "minmux-client"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow.workspace = true
+crossterm.workspace = true
+minmux-ipc.workspace = true
+ratatui.workspace = true
+serde.workspace = true
+tokio.workspace = true
