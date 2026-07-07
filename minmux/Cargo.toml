@@ -1,0 +1,15 @@
+[package]
+name = "minmux"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "minmux"
+path = "src/bin/minmux.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+minmux-client.workspace = true
+minmux-daemon.workspace = true
+tokio.workspace = true
