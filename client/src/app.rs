@@ -55,27 +55,22 @@ pub async fn run(socket_path: &Path, session_name: &str) -> Result<()> {
     let state_recv = Arc::clone(&state);
     let conn_recv = Arc::clone(&conn);
     let _recv_task = tokio::spawn(async move {
-        loop {
-            match conn_recv.recv::<ServerMessage>().await {
-                Ok(msg) => {
-                    let mut s = state_recv.lock().await;
-                    match msg {
-                        ServerMessage::SessionState(info) => {
-                            s.session = Some(info);
-                        }
-                        ServerMessage::PaneOutput { pane_id: _, data: _ } => {
-                            // Pane output rendering via vt100 emulation is a future enhancement.
-                        }
-                        ServerMessage::Error { message } => {
-                            s.status_message = Some(format!("Error: {message}"));
-                        }
-                        ServerMessage::Detached => {
-                            s.should_quit = true;
-                            break;
-                        }
-                    }
+        while let Ok(msg) = conn_recv.recv::<ServerMessage>().await {
+            let mut s = state_recv.lock().await;
+            match msg {
+                ServerMessage::SessionState(info) => {
+                    s.session = Some(info);
                 }
-                Err(_) => break,
+                ServerMessage::PaneOutput { pane_id: _, data: _ } => {
+                    // Pane output rendering via vt100 emulation is a future enhancement.
+                }
+                ServerMessage::Error { message } => {
+                    s.status_message = Some(format!("Error: {message}"));
+                }
+                ServerMessage::Detached => {
+                    s.should_quit = true;
+                    break;
+                }
             }
         }
     });

@@ -43,10 +43,6 @@ impl Window {
             active_pane_id: self.panes[self.active_pane_idx].id,
         }
     }
-
-    fn active_pane_id(&self) -> PaneId {
-        self.panes[self.active_pane_idx].id
-    }
 }
 
 // ─── Session ─────────────────────────────────────────────────────────────────
@@ -92,6 +88,12 @@ pub struct SessionStore {
     /// All output subscribers, keyed by session name.
     output_senders: HashMap<String, Vec<mpsc::UnboundedSender<OutputItem>>>,
     next_id: u64,
+}
+
+impl Default for SessionStore {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SessionStore {
@@ -370,14 +372,17 @@ impl SessionStore {
                     .iter()
                     .position(|p| p.id == pane_id)
                     .ok_or_else(|| anyhow!("pane not found in window"))?;
+
+                // Determine active state before removing the pane so we don't
+                // index into an empty vec when the window loses its last pane.
+                let was_active = win.active_pane_idx == pane_idx;
+
                 let pane = win.panes.remove(pane_idx);
 
                 // Adjust active pane index if necessary.
                 if win.active_pane_idx >= win.panes.len() && !win.panes.is_empty() {
                     win.active_pane_idx = win.panes.len() - 1;
                 }
-
-                let was_active = pane.id == session.windows[win_idx].active_pane_id();
 
                 if let Some(dest_idx) = target_win_idx {
                     // Move to existing window.
@@ -431,5 +436,489 @@ impl SessionStore {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Shell used in tests so we don't rely on $SHELL being set.
+    const TEST_SHELL: &str = "/bin/sh";
+
+    // ─── Helpers ─────────────────────────────────────────────────────────────
+
+    /// Create a fresh store that already contains a session with one window and one pane.
+    fn store_with_session(name: &str) -> SessionStore {
+        let mut store = SessionStore::new();
+        store.ensure_session(name);
+        store
+    }
+
+    /// Add an extra pane to the active window of `name`.
+    fn add_pane(store: &mut SessionStore, session_name: &str) {
+        let window_id = store.session_info(session_name).active_window_id;
+        store
+            .create_pane(session_name, window_id, Some(TEST_SHELL.to_string()))
+            .expect("create_pane");
+    }
+
+    // ─── ensure_session ───────────────────────────────────────────────────────
+
+    #[test]
+    fn ensure_session_creates_one_window_one_pane() {
+        let store = store_with_session("test");
+        let info = store.session_info("test");
+
+        assert_eq!(info.name, "test");
+        assert_eq!(info.windows.len(), 1);
+        assert_eq!(info.windows[0].panes.len(), 1);
+        assert_eq!(info.active_window_id, info.windows[0].id);
+        assert_eq!(
+            info.windows[0].active_pane_id,
+            info.windows[0].panes[0].id
+        );
+    }
+
+    #[test]
+    fn ensure_session_is_idempotent() {
+        let mut store = store_with_session("test");
+        store.ensure_session("test");
+        let info = store.session_info("test");
+        // Still exactly one window and one pane.
+        assert_eq!(info.windows.len(), 1);
+        assert_eq!(info.windows[0].panes.len(), 1);
+    }
+
+    #[test]
+    fn ensure_session_multiple_independent_sessions() {
+        let mut store = SessionStore::new();
+        store.ensure_session("alpha");
+        store.ensure_session("beta");
+
+        let alpha = store.session_info("alpha");
+        let beta = store.session_info("beta");
+        assert_eq!(alpha.name, "alpha");
+        assert_eq!(beta.name, "beta");
+        // The two sessions must not share window or pane IDs.
+        let alpha_win_id = alpha.windows[0].id;
+        let beta_win_id = beta.windows[0].id;
+        assert_ne!(alpha_win_id, beta_win_id);
+        let alpha_pane_id = alpha.windows[0].panes[0].id;
+        let beta_pane_id = beta.windows[0].panes[0].id;
+        assert_ne!(alpha_pane_id, beta_pane_id);
+    }
+
+    // ─── create_pane ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn create_pane_appends_pane_to_window() {
+        let mut store = store_with_session("test");
+        let window_id = store.session_info("test").active_window_id;
+
+        store
+            .create_pane("test", window_id, Some(TEST_SHELL.to_string()))
+            .unwrap();
+
+        let info = store.session_info("test");
+        assert_eq!(info.windows[0].panes.len(), 2);
+    }
+
+    #[test]
+    fn create_pane_assigns_unique_ids() {
+        let mut store = store_with_session("test");
+        let window_id = store.session_info("test").active_window_id;
+
+        store
+            .create_pane("test", window_id, Some(TEST_SHELL.to_string()))
+            .unwrap();
+        store
+            .create_pane("test", window_id, Some(TEST_SHELL.to_string()))
+            .unwrap();
+
+        let info = store.session_info("test");
+        assert_eq!(info.windows[0].panes.len(), 3);
+        let ids: Vec<PaneId> = info.windows[0].panes.iter().map(|p| p.id).collect();
+        let mut unique = ids.clone();
+        unique.dedup();
+        unique.sort();
+        assert_eq!(unique.len(), ids.len(), "all pane IDs must be unique");
+    }
+
+    #[test]
+    fn create_pane_unknown_session_returns_error() {
+        let mut store = SessionStore::new();
+        let err = store
+            .create_pane("nonexistent", 1, None)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("session not found"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn create_pane_unknown_window_returns_error() {
+        let mut store = store_with_session("test");
+        let err = store
+            .create_pane("test", 9999, None)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("window"),
+            "unexpected error: {err}"
+        );
+    }
+
+    // ─── navigate ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn navigate_down_moves_to_next_pane() {
+        let mut store = store_with_session("test");
+        let window_id = store.session_info("test").active_window_id;
+        let first_pane_id = store.session_info("test").windows[0].panes[0].id;
+
+        store
+            .create_pane("test", window_id, Some(TEST_SHELL.to_string()))
+            .unwrap();
+        let second_pane_id = store.session_info("test").windows[0].panes[1].id;
+
+        // Initially the first pane should be active.
+        assert_eq!(
+            store.session_info("test").windows[0].active_pane_id,
+            first_pane_id
+        );
+
+        store
+            .navigate("test", NavigateDirection::Down)
+            .unwrap();
+
+        assert_eq!(
+            store.session_info("test").windows[0].active_pane_id,
+            second_pane_id
+        );
+    }
+
+    #[test]
+    fn navigate_up_moves_to_previous_pane() {
+        let mut store = store_with_session("test");
+        let window_id = store.session_info("test").active_window_id;
+        let first_pane_id = store.session_info("test").windows[0].panes[0].id;
+
+        add_pane(&mut store, "test");
+
+        store.navigate("test", NavigateDirection::Down).unwrap();
+        store.navigate("test", NavigateDirection::Up).unwrap();
+
+        assert_eq!(
+            store.session_info("test").windows[0].active_pane_id,
+            first_pane_id
+        );
+        let _ = window_id; // suppress unused warning
+    }
+
+    #[test]
+    fn navigate_up_from_top_returns_error() {
+        let mut store = store_with_session("test");
+        let err = store
+            .navigate("test", NavigateDirection::Up)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("no pane above"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn navigate_down_from_bottom_returns_error() {
+        let mut store = store_with_session("test");
+        let err = store
+            .navigate("test", NavigateDirection::Down)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("no pane below"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn navigate_right_switches_active_window() {
+        let mut store = store_with_session("test");
+        let window1_id = store.session_info("test").active_window_id;
+
+        // Create a second window by moving a new pane right.
+        add_pane(&mut store, "test");
+        let pane2_id = store.session_info("test").windows[0].panes[1].id;
+        store
+            .move_pane("test", pane2_id, MoveDirection::Right)
+            .unwrap();
+
+        let window2_id = store
+            .session_info("test")
+            .windows
+            .iter()
+            .find(|w| w.id != window1_id)
+            .unwrap()
+            .id;
+
+        store.navigate("test", NavigateDirection::Right).unwrap();
+        assert_eq!(store.session_info("test").active_window_id, window2_id);
+
+        store.navigate("test", NavigateDirection::Left).unwrap();
+        assert_eq!(store.session_info("test").active_window_id, window1_id);
+    }
+
+    #[test]
+    fn navigate_left_from_leftmost_window_returns_error() {
+        let mut store = store_with_session("test");
+        let err = store
+            .navigate("test", NavigateDirection::Left)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("no window to the left"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn navigate_right_from_rightmost_window_returns_error() {
+        let mut store = store_with_session("test");
+        let err = store
+            .navigate("test", NavigateDirection::Right)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("no window to the right"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn navigate_unknown_session_returns_error() {
+        let mut store = SessionStore::new();
+        let err = store
+            .navigate("ghost", NavigateDirection::Up)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("session not found"),
+            "unexpected: {err}"
+        );
+    }
+
+    // ─── move_pane (vertical) ─────────────────────────────────────────────────
+
+    #[test]
+    fn move_pane_up_reorders_panes() {
+        let mut store = store_with_session("test");
+        let pane1_id = store.session_info("test").windows[0].panes[0].id;
+
+        add_pane(&mut store, "test");
+        let pane2_id = store.session_info("test").windows[0].panes[1].id;
+
+        store.move_pane("test", pane2_id, MoveDirection::Up).unwrap();
+
+        let info = store.session_info("test");
+        assert_eq!(info.windows[0].panes[0].id, pane2_id);
+        assert_eq!(info.windows[0].panes[1].id, pane1_id);
+    }
+
+    #[test]
+    fn move_pane_down_reorders_panes() {
+        let mut store = store_with_session("test");
+        let pane1_id = store.session_info("test").windows[0].panes[0].id;
+
+        add_pane(&mut store, "test");
+        let pane2_id = store.session_info("test").windows[0].panes[1].id;
+
+        store.move_pane("test", pane1_id, MoveDirection::Down).unwrap();
+
+        let info = store.session_info("test");
+        assert_eq!(info.windows[0].panes[0].id, pane2_id);
+        assert_eq!(info.windows[0].panes[1].id, pane1_id);
+    }
+
+    #[test]
+    fn move_pane_up_from_top_returns_error() {
+        let mut store = store_with_session("test");
+        let pane_id = store.session_info("test").windows[0].panes[0].id;
+
+        let err = store
+            .move_pane("test", pane_id, MoveDirection::Up)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("already at the top"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn move_pane_down_from_bottom_returns_error() {
+        let mut store = store_with_session("test");
+        let pane_id = store.session_info("test").windows[0].panes[0].id;
+
+        let err = store
+            .move_pane("test", pane_id, MoveDirection::Down)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("already at the bottom"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn move_pane_up_and_down_are_inverse() {
+        let mut store = store_with_session("test");
+        add_pane(&mut store, "test");
+        add_pane(&mut store, "test");
+
+        // Record original order.
+        let original: Vec<PaneId> = store.session_info("test").windows[0]
+            .panes
+            .iter()
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(original.len(), 3);
+
+        let pane_b = original[1];
+
+        // Move middle pane up then back down.
+        store.move_pane("test", pane_b, MoveDirection::Up).unwrap();
+        store.move_pane("test", pane_b, MoveDirection::Down).unwrap();
+
+        let after: Vec<PaneId> = store.session_info("test").windows[0]
+            .panes
+            .iter()
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(after, original);
+    }
+
+    // ─── move_pane (horizontal) ───────────────────────────────────────────────
+
+    #[test]
+    fn move_pane_right_creates_new_window_when_none_exists() {
+        let mut store = store_with_session("test");
+        let pane1_id = store.session_info("test").windows[0].panes[0].id;
+
+        add_pane(&mut store, "test");
+        let pane2_id = store.session_info("test").windows[0].panes[1].id;
+
+        store
+            .move_pane("test", pane2_id, MoveDirection::Right)
+            .unwrap();
+
+        let info = store.session_info("test");
+        assert_eq!(info.windows.len(), 2);
+        assert_eq!(info.windows[0].panes.len(), 1);
+        assert_eq!(info.windows[0].panes[0].id, pane1_id);
+        assert_eq!(info.windows[1].panes.len(), 1);
+        assert_eq!(info.windows[1].panes[0].id, pane2_id);
+    }
+
+    #[test]
+    fn move_pane_left_creates_new_window_to_the_left() {
+        let mut store = store_with_session("test");
+        let pane1_id = store.session_info("test").windows[0].panes[0].id;
+
+        add_pane(&mut store, "test");
+        let pane2_id = store.session_info("test").windows[0].panes[1].id;
+
+        store
+            .move_pane("test", pane2_id, MoveDirection::Left)
+            .unwrap();
+
+        let info = store.session_info("test");
+        assert_eq!(info.windows.len(), 2);
+        // The new window is to the LEFT, so it should be at index 0.
+        assert_eq!(info.windows[0].panes[0].id, pane2_id);
+        assert_eq!(info.windows[1].panes[0].id, pane1_id);
+    }
+
+    #[test]
+    fn move_pane_right_to_existing_window() {
+        let mut store = store_with_session("test");
+        let window1_id = store.session_info("test").active_window_id;
+
+        // Build window 2 by moving a new pane right.
+        add_pane(&mut store, "test");
+        let pane2_id = store.session_info("test").windows[0].panes[1].id;
+        store
+            .move_pane("test", pane2_id, MoveDirection::Right)
+            .unwrap();
+
+        let window2_id = store
+            .session_info("test")
+            .windows
+            .iter()
+            .find(|w| w.id != window1_id)
+            .unwrap()
+            .id;
+
+        // Now create another pane in window 1 and move it right.
+        store
+            .create_pane("test", window1_id, Some(TEST_SHELL.to_string()))
+            .unwrap();
+        let new_pane_id = store
+            .session_info("test")
+            .windows
+            .iter()
+            .find(|w| w.id == window1_id)
+            .unwrap()
+            .panes
+            .last()
+            .unwrap()
+            .id;
+
+        store
+            .move_pane("test", new_pane_id, MoveDirection::Right)
+            .unwrap();
+
+        let info = store.session_info("test");
+        let win2 = info.windows.iter().find(|w| w.id == window2_id).unwrap();
+        assert_eq!(win2.panes.len(), 2);
+        assert!(win2.panes.iter().any(|p| p.id == new_pane_id));
+    }
+
+    #[test]
+    fn move_pane_removes_source_window_when_it_becomes_empty() {
+        let mut store = store_with_session("test");
+        let window1_id = store.session_info("test").active_window_id;
+        let pane1_id = store.session_info("test").windows[0].panes[0].id;
+
+        // Move the only pane right; the source window must be removed.
+        store
+            .move_pane("test", pane1_id, MoveDirection::Right)
+            .unwrap();
+
+        let info = store.session_info("test");
+        assert_eq!(info.windows.len(), 1, "original empty window should be removed");
+        assert!(
+            !info.windows.iter().any(|w| w.id == window1_id),
+            "original window should no longer exist"
+        );
+        // The pane should now live in the remaining window.
+        assert_eq!(info.windows[0].panes[0].id, pane1_id);
+    }
+
+    #[test]
+    fn move_pane_unknown_pane_returns_error() {
+        let mut store = store_with_session("test");
+        let err = store
+            .move_pane("test", 9999, MoveDirection::Up)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("not found"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn move_pane_unknown_session_returns_error() {
+        let mut store = SessionStore::new();
+        let err = store
+            .move_pane("ghost", 1, MoveDirection::Up)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("session not found"),
+            "unexpected: {err}"
+        );
     }
 }

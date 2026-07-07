@@ -65,7 +65,7 @@ fn attach(session_name: &str) -> Result<()> {
     })
 }
 
-fn run_daemon(socket_path: &PathBuf) -> Result<()> {
+fn run_daemon(socket_path: &std::path::Path) -> Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
