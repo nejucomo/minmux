@@ -76,11 +76,11 @@ fn run_daemon(socket_path: &PathBuf) -> Result<()> {
 fn default_socket_path() -> Result<PathBuf> {
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| dirs_home().join(".local").join("run"));
+        .unwrap_or_else(|_| home_directory().join(".local").join("run"));
     Ok(runtime_dir.join("minmux").join("minmux.sock"))
 }
 
-fn dirs_home() -> PathBuf {
+fn home_directory() -> PathBuf {
     std::env::var("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/tmp"))

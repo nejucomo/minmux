@@ -66,11 +66,6 @@ impl Session {
         }
     }
 
-    #[allow(dead_code)]
-    fn active_window(&self) -> &Window {
-        &self.windows[self.active_window_idx]
-    }
-
     fn active_window_mut(&mut self) -> &mut Window {
         &mut self.windows[self.active_window_idx]
     }
@@ -124,6 +119,9 @@ impl SessionStore {
         rx
     }
 
+    /// Distribute pane output to all clients subscribed to `session_name`.
+    ///
+    /// This will be called by the PTY output-reading task once that is wired up.
     #[allow(dead_code)]
     fn broadcast_output(&mut self, session_name: &str, pane_id: PaneId, data: Vec<u8>) {
         if let Some(senders) = self.output_senders.get_mut(session_name) {
