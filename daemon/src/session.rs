@@ -601,7 +601,6 @@ mod tests {
     #[test]
     fn navigate_up_moves_to_previous_pane() {
         let mut store = store_with_session("test");
-        let window_id = store.session_info("test").active_window_id;
         let first_pane_id = store.session_info("test").windows[0].panes[0].id;
 
         add_pane(&mut store, "test");
@@ -613,7 +612,6 @@ mod tests {
             store.session_info("test").windows[0].active_pane_id,
             first_pane_id
         );
-        let _ = window_id; // suppress unused warning
     }
 
     #[test]

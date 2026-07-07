@@ -341,7 +341,7 @@ mod tests {
     }
 
     fn enter_command(state: &mut AppState) {
-        let (_, _) = handle_key(ctrl('t'), state);
+        let _ = handle_key(ctrl('t'), state);
         assert_eq!(state.input_mode, InputMode::Command);
     }
 
